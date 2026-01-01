@@ -39,7 +39,16 @@ const App: React.FC = () => {
   // --- Handlers ---
   const handleFilesUpload = useCallback((files: FileList) => {
     const newItems = groupFilesByDirectory(files);
-    setItems(prev => [...prev, ...newItems]);
+    setItems(prev => {
+      const updated = [...prev, ...newItems];
+      // 自动全选新导入的资产
+      setSelectedIds(prevSelected => {
+        const next = new Set(prevSelected);
+        newItems.forEach(item => next.add(item.id));
+        return next;
+      });
+      return updated;
+    });
   }, []);
 
   const handleSelect = useCallback((id: string, multi: boolean) => {

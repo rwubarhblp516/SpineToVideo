@@ -172,7 +172,7 @@ export const ExportPanel: React.FC<ExportPanelProps> = ({
               </div>
 
               <button
-                onClick={() => onUpdate({ backgroundColor: config.backgroundColor === 'transparent' ? '#0b0c10' : 'transparent' })}
+                onClick={() => onUpdate({ backgroundColor: config.backgroundColor === 'transparent' ? '#00FF00' : 'transparent' })}
                 className={`px-4 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest border transition-all ${config.backgroundColor === 'transparent'
                   ? 'bg-indigo-500 text-white border-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.4)]'
                   : 'bg-white/5 text-white/40 border-white/10 hover:border-white/20'

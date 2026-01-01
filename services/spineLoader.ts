@@ -1,150 +1,150 @@
-// This service mocks the interaction with the @esotericsoftware/spine-webgl library.
-// Since we cannot import the actual heavy webgl library in this environment, 
-// we structure the code to show exactly how it would be implemented.
-
 import { AnimationItem, SpineFiles } from '../types';
 
-// Helper to determine file type based on extension
+/**
+ * 助手函数：根据后缀名判断文件类型
+ */
 export const getFileType = (filename: string) => {
   const lower = filename.toLowerCase();
   if (lower.endsWith('.json')) return 'json';
   if (lower.endsWith('.skel')) return 'skel';
-  if (lower.endsWith('.spine')) return 'spine'; // Project file
+  if (lower.endsWith('.spine')) return 'spine'; // Spine 项目源文件
   if (lower.endsWith('.atlas')) return 'atlas';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp')) return 'image';
   return 'unknown';
 };
 
-// Group files into logical animation sets based on directory structure
+/**
+ * 智能导入逻辑：扫描文件夹列表并自动识别资产
+ * 规则：
+ * 1. 一个资产是由 skeleton (.json/.skel) 和 atlas (.atlas) 共同定义的。
+ * 2. 以包含 skeleton 的文件夹作为一个资产的根目录。
+ * 3. 自动递归查找大文件夹下的所有子文件夹。
+ * 4. 资产名称跟随其文件夹名称。
+ */
 export const groupFilesByDirectory = (fileList: FileList): AnimationItem[] => {
   const fileArray = Array.from(fileList);
-  
-  // 1. Map directory path -> components
-  const dirMap: Record<string, { 
-    skeleton: File | null, 
-    atlas: File | null, 
-    images: File[],
-    skeletonType: 'skel' | 'json' | 'spine' | null
+
+  // 建立路径映射
+  // 路径 -> 该路径下的文件分类
+  const pathMap: Record<string, {
+    skeleton: File | null;
+    atlas: File | null;
+    images: File[];
+    skeletonType: 'skel' | 'json' | 'spine' | null;
   }> = {};
 
-  const getDir = (path: string) => {
-    if (!dirMap[path]) {
-      dirMap[path] = { skeleton: null, atlas: null, images: [], skeletonType: null };
+  const getEntry = (path: string) => {
+    if (!pathMap[path]) {
+      pathMap[path] = { skeleton: null, atlas: null, images: [], skeletonType: null };
     }
-    return dirMap[path];
+    return pathMap[path];
   };
 
-  // 2. Initial pass: categorize files by their immediate parent directory
+  // 1. 预处理：将所有文件按文件夹路径归类
   fileArray.forEach((file) => {
-    // webkitRelativePath example: "Parent/Child/file.png"
-    const pathParts = file.webkitRelativePath.split('/');
-    pathParts.pop(); // Remove filename
-    const dirPath = pathParts.join('/');
-    
-    // Skip hidden files/folders
-    if (file.name.startsWith('.') || dirPath.split('/').some(p => p.startsWith('.'))) return;
+    // webkitRelativePath: "Characters/Hero/skeleton.json"
+    const parts = file.webkitRelativePath.split('/');
+    parts.pop(); // 去掉文件名
+    const dirPath = parts.join('/');
 
-    const entry = getDir(dirPath);
+    // 忽略隐藏文件/文件夹
+    if (file.name.startsWith('.') || parts.some(p => p.startsWith('.'))) return;
+
     const type = getFileType(file.name);
+    const entry = getEntry(dirPath);
 
     if (type === 'skel' || type === 'json' || type === 'spine') {
-      // Smart Priority Logic: skel > json > spine
+      // 优先级：skel > json > spine
       const currentType = entry.skeletonType;
-      let shouldReplace = false;
-
+      let better = false;
       if (!entry.skeleton) {
-        shouldReplace = true;
+        better = true;
       } else {
-        // If we have a spine project file, always overwrite with an export file (skel/json)
-        if (currentType === 'spine' && (type === 'skel' || type === 'json')) shouldReplace = true;
-        // If we have json, prefer binary skel (usually cleaner export)
-        else if (currentType === 'json' && type === 'skel') shouldReplace = true;
+        if (currentType === 'spine' && (type === 'skel' || type === 'json')) better = true;
+        else if (currentType === 'json' && type === 'skel') better = true;
       }
-
-      if (shouldReplace) {
+      if (better) {
         entry.skeleton = file;
         entry.skeletonType = type as any;
       }
     } else if (type === 'atlas') {
-      // If multiple atlases exist, prefer one that matches the skeleton name if possible
-      // For now, simpler logic: take the first one, or override if we find a better name match?
-      // Keeping it simple: just take the file.
-      if (!entry.atlas) entry.atlas = file;
-      else if (entry.skeleton && file.name.startsWith(entry.skeleton.name.split('.')[0])) {
-         entry.atlas = file;
+      // 如果已存在图集，且当前文件名更匹配骨骼名，则替换
+      if (!entry.atlas) {
+        entry.atlas = file;
+      } else if (entry.skeleton && file.name.includes(entry.skeleton.name.split('.')[0])) {
+        entry.atlas = file;
       }
     } else if (type === 'image') {
       entry.images.push(file);
     }
   });
 
-  // 3. Identify valid roots and gather images from subdirectories
-  const validItems: AnimationItem[] = [];
-  
-  // A folder is a "Root" if it contains a Skeleton and an Atlas
-  const roots = Object.keys(dirMap).filter(path => {
-      const entry = dirMap[path];
-      // We accept spine file as a fallback, but practically runtime needs skel/json
-      return entry.skeleton && entry.atlas; 
+  // 2. 识别“资产根目录” (既有骨骼也有图集的文件夹)
+  const allPaths = Object.keys(pathMap).sort(); // 按路径排序，保证层级关系和名称顺序
+  const assetRoots = allPaths.filter(path => {
+    const e = pathMap[path];
+    return e.skeleton && e.atlas;
   });
 
-  roots.forEach(rootPath => {
-    const rootEntry = dirMap[rootPath];
+  // 3. 构建最终资产项
+  const items: AnimationItem[] = [];
+
+  assetRoots.forEach(rootPath => {
+    const rootEntry = pathMap[rootPath];
     if (!rootEntry.skeleton || !rootEntry.atlas) return;
 
-    // Collect images:
-    // 1. From the root folder itself
-    // 2. From any subfolder (e.g. root/images/), UNLESS that subfolder is a separate valid root
-    const collectedImages: File[] = [];
+    // 为该资产收集所有相关图片
+    // 逻辑：收集该文件夹下的图片，以及所有非“新资产根目录”的子文件夹下的图片
+    const allImages: File[] = [...rootEntry.images];
 
-    Object.keys(dirMap).forEach(path => {
-      // Check if path is the root or a subfolder of root
-      if (path === rootPath || path.startsWith(rootPath + '/')) {
-        // If this subfolder is actually ANOTHER animation root (nested project), don't steal its images
-        if (path !== rootPath && roots.includes(path)) return;
-        
-        collectedImages.push(...dirMap[path].images);
+    // 查找子目录中的图片
+    allPaths.forEach(otherPath => {
+      // 如果 otherPath 是 rootPath 的子目录，且 otherPath 自己不是另一个资产根
+      if (otherPath.startsWith(rootPath + '/') && !assetRoots.includes(otherPath)) {
+        allImages.push(...pathMap[otherPath].images);
       }
     });
 
-    if (collectedImages.length > 0) {
-      validItems.push({
-        id: crypto.randomUUID(),
-        name: rootPath.split('/').pop() || 'Untitled',
-        files: {
-          skeleton: rootEntry.skeleton,
-          atlas: rootEntry.atlas,
-          images: collectedImages,
-          basePath: rootPath
-        },
-        animationNames: [], // To be populated by parsing skeleton data later
-        defaultAnimation: '',
-        status: 'idle'
-      });
-    }
+    // 创建资产项
+    items.push({
+      id: crypto.randomUUID(),
+      name: rootPath.split('/').pop() || 'Untitled',
+      files: {
+        skeleton: rootEntry.skeleton,
+        atlas: rootEntry.atlas,
+        images: allImages,
+        basePath: rootPath
+      },
+      animationNames: [],
+      defaultAnimation: '',
+      status: 'idle'
+    });
   });
 
-  return validItems;
+  // 最终根据名称排序，提高易用性
+  return items.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 };
 
-// Utility to create object URLs for assets
+/**
+ * 为资产创建 URL 映射
+ */
 export const createAssetUrls = (files: SpineFiles) => {
   const urls: Record<string, string> = {};
-  
-  // Skeleton
+
   if (files.skeleton) urls[files.skeleton.name] = URL.createObjectURL(files.skeleton);
-  
-  // Atlas
   if (files.atlas) urls[files.atlas.name] = URL.createObjectURL(files.atlas);
-  
-  // Images - Map filename to Blob URL
+
   files.images.forEach(img => {
+    // 同时映射完整路径（如果有）和纯文件名，提高加载兼容性
     urls[img.name] = URL.createObjectURL(img);
   });
 
   return urls;
 };
 
+/**
+ * 释放 URL
+ */
 export const revokeAssetUrls = (urls: Record<string, string>) => {
   Object.values(urls).forEach(url => URL.revokeObjectURL(url));
 };

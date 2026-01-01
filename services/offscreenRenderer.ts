@@ -21,6 +21,7 @@ export interface OffscreenRenderTask {
     format: ExportFormat;
     duration?: number; // 可选,如果不指定则使用动画实际时长
     backgroundColor?: string; // 背景色,支持hex或'transparent'
+    abortSignal?: AbortSignal; // 中断信号
 }
 
 export class OffscreenRenderer {
@@ -38,9 +39,14 @@ export class OffscreenRenderer {
     }
 
     async renderToVideo(task: OffscreenRenderTask): Promise<Blob> {
-        const { assetName, animation, files, width, height, fps, format, duration, backgroundColor } = task;
+        const { assetName, animation, files, width, height, fps, format, duration, backgroundColor, abortSignal } = task;
 
         console.log(`[离屏渲染] 开始: ${assetName} - ${animation}`);
+
+        // 检查初始中断
+        if (abortSignal?.aborted) {
+            throw new Error('AbortError');
+        }
 
         try {
             // 加载资产
@@ -49,6 +55,9 @@ export class OffscreenRenderer {
             if (!animations.includes(animation)) {
                 throw new Error(`动画 "${animation}" 不存在于资产 "${assetName}" 中`);
             }
+
+            // 检查载入后中断
+            if (abortSignal?.aborted) throw new Error('AbortError');
 
             // 设置渲染参数
             this.renderer.resize(width, height);
@@ -78,21 +87,19 @@ export class OffscreenRenderer {
             const isMP4H264 = format === 'mp4-h264';
 
             if (isImageSequence) {
-                // 使用图片序列导出器
                 const imageFormat = format === 'png-sequence' ? 'png' : 'jpeg';
                 const exporter = new ImageSequenceExporter(this.canvas, fps, imageFormat);
                 exporter.start();
 
                 // 逐帧渲染并捕获
                 for (let i = 0; i < totalFrames; i++) {
+                    if (abortSignal?.aborted) throw new Error('AbortError');
                     this.renderer.updateAndRender(frameDelta);
                     await exporter.capture();
                 }
 
                 blob = await exporter.stop();
-                console.log(`[离屏渲染] 捕获了 ${exporter.getFrameCount()} 帧`);
             } else if (isMP4H264) {
-                // 使用 WebCodecs MP4 编码器
                 if (!isWebCodecsSupported()) {
                     throw new Error('浏览器不支持 WebCodecs API,请使用 Chrome 94+ 或 Edge 94+');
                 }
@@ -102,31 +109,27 @@ export class OffscreenRenderer {
 
                 // 逐帧渲染并编码
                 for (let i = 0; i < totalFrames; i++) {
+                    if (abortSignal?.aborted) throw new Error('AbortError');
                     this.renderer.updateAndRender(frameDelta);
-                    // 传入精确的时间戳 (微秒)
                     await mp4Recorder.encodeFrame((i * 1000000) / fps);
                 }
 
                 blob = await mp4Recorder.stop();
-                console.log(`[离屏渲染] MP4编码完成: ${mp4Recorder.getFrameCount()} 帧`);
             } else {
-                // 使用 MediaRecorder (WebM)
                 const recorder = new CanvasRecorder(this.canvas, fps, format as VideoFormat);
                 recorder.start(fps, width, height);
 
-                // 逐帧渲染并捕获 (MediaRecorder 较难完全逐帧同步,但尽量模拟频率)
                 for (let i = 0; i < totalFrames; i++) {
+                    if (abortSignal?.aborted) throw new Error('AbortError');
                     this.renderer.updateAndRender(frameDelta);
-                    await new Promise(resolve => setTimeout(resolve, 10)); // 给 MediaRecorder 一点处理时间
+                    await new Promise(resolve => setTimeout(resolve, 10));
                 }
 
                 blob = await recorder.stop();
             }
 
-            // 停止渲染
             this.renderer.stop();
-
-            console.log(`[离屏渲染] 完成: ${assetName} - ${animation} (${(blob.size / 1024 / 1024).toFixed(2)} MB)`);
+            console.log(`[离屏渲染] 完成: ${assetName} - ${animation}`);
 
             return blob;
         } catch (error) {
@@ -160,14 +163,17 @@ export class ExportManager {
     }
 
     private async processQueue() {
-        // 如果已达到最大并行数,等待
-        if (this.activeRenderers.size >= this.maxConcurrent) {
-            return;
-        }
+        if (this.activeRenderers.size >= this.maxConcurrent) return;
 
-        // 从队列取出任务
         const item = this.queue.shift();
         if (!item) return;
+
+        // 如果任务在启动前就被中止，直接忽略
+        if (item.task.abortSignal?.aborted) {
+            item.reject(new Error('AbortError'));
+            this.processQueue();
+            return;
+        }
 
         const renderer = new OffscreenRenderer();
         this.activeRenderers.add(renderer);
@@ -180,14 +186,15 @@ export class ExportManager {
         } finally {
             renderer.dispose();
             this.activeRenderers.delete(renderer);
-
-            // 继续处理队列
             this.processQueue();
         }
     }
 
     cancelAll() {
+        // 清空等待队列
+        this.queue.forEach(item => item.reject(new Error('AbortError')));
         this.queue = [];
+        // activeRenderers 会根据各自引用的 signal 停止内部循环
         this.activeRenderers.forEach(r => r.dispose());
         this.activeRenderers.clear();
     }

@@ -24,6 +24,7 @@ export class SpineRenderer {
   skeleton: any = null;
   state: any = null;
   bounds: any = null;
+  globalBounds: any = null; // 资产全动作最大包围盒
 
   // 渲染状态
   lastTime: number = 0;
@@ -31,7 +32,7 @@ export class SpineRenderer {
   lastDebugLog: number = 0; // Debug throttle
 
   // 配置
-  bgColor: number[] = [0, 0, 0, 0]; // 默认透明
+  bgColor: number[] = [0, 1, 0, 1]; // 默认绿幕 #00FF00
   scale: number = 1.0;
 
   // Spine 3.8 兼容层
@@ -83,6 +84,7 @@ export class SpineRenderer {
     this.skeleton = null;
     this.state = null;
     this.bounds = null;
+    this.globalBounds = null;
     revokeAssetUrls(this.urls);
 
     if (!files.skeleton || !files.atlas) {
@@ -95,10 +97,6 @@ export class SpineRenderer {
     try {
       // 使用 Spine 的 AssetManager 来正确加载资源
       const assetManager = new this.spineWebGL.AssetManager(this.gl);
-
-      // 自定义下载器，使用 Blob URL
-      const originalLoad = assetManager.loadText.bind(assetManager);
-      const originalLoadTexture = assetManager.loadTexture.bind(assetManager);
 
       // 加载 Atlas 文本
       const atlasUrl = this.urls[files.atlas.name];
@@ -177,18 +175,15 @@ export class SpineRenderer {
       this.skeleton.setToSetupPose();
       this.skeleton.updateWorldTransform();
 
-
-      // 6. 计算边界
-      const offset = new (this.spineWebGL.Vector2 || spine.Vector2)();
-      const size = new (this.spineWebGL.Vector2 || spine.Vector2)();
-      this.skeleton.getBounds(offset, size, []);
-
-      this.bounds = { offset, size };
-      // 7. 创建动画状态
+      // 6. 创建动画状态
       const animationStateData = new spine.AnimationStateData(skeletonData);
       this.state = new spine.AnimationState(animationStateData);
 
       const animNames = skeletonData.animations.map((a: any) => a.name);
+
+      // 加载完成后，立即计算全局最大边界，确保所有动作对齐
+      this.computeGlobalBounds();
+
       return animNames;
     } catch (e) {
       console.error('加载 Spine 资源失败:', e);
@@ -205,9 +200,118 @@ export class SpineRenderer {
         // 立即更新一次以确保 duration 等信息可用
         this.totalTime = entry.animation.duration;
         this.currentTime = 0;
+
+        // 优先使用全局边界以保持角色比例统一
+        if (this.globalBounds) {
+          this.bounds = this.globalBounds;
+        } else {
+          this.updateAnimationBounds(animName);
+        }
       } catch (e) {
-        console.warn(`动画 ${animName} 未找到`);
+        console.warn(`动画 ${animName} 未找到`, e);
       }
+    }
+  }
+
+  /**
+   * 扫描全资产下所有动画的最大合集边界
+   */
+  private computeGlobalBounds() {
+    if (!this.skeleton) return;
+
+    const animations = this.skeleton.data.animations;
+    if (!animations || animations.length === 0) return;
+
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    const offset = new (this.spineWebGL.Vector2 || spine.Vector2)();
+    const size = new (this.spineWebGL.Vector2 || spine.Vector2)();
+
+    console.log(`[SpineRenderer] 正在计算全动作对齐边界 (共 ${animations.length} 个动画)...`);
+
+    for (const anim of animations) {
+      const duration = anim.duration;
+      const samples = duration > 0 ? 5 : 1;
+
+      for (let i = 0; i <= samples; i++) {
+        const time = (i / samples) * duration;
+        // 3.8 的 apply 签名通常是: (skeleton, lastTime, time, loop, events, alpha, blend, direction)
+        anim.apply(this.skeleton, 0, time, false, [], 1.0, 0, 0);
+        this.skeleton.updateWorldTransform();
+        this.skeleton.getBounds(offset, size, []);
+
+        minX = Math.min(minX, offset.x);
+        minY = Math.min(minY, offset.y);
+        maxX = Math.max(maxX, offset.x + size.x);
+        maxY = Math.max(maxY, offset.y + size.y);
+      }
+    }
+
+    // 给全局边界 15% 的安全边距
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const paddingX = width * 0.15;
+    const paddingY = height * 0.15;
+
+    this.globalBounds = {
+      offset: { x: minX - paddingX, y: minY - paddingY },
+      size: { x: width + paddingX * 2, y: height + paddingY * 2 }
+    };
+
+    this.bounds = this.globalBounds;
+
+    // 重置状态
+    this.skeleton.setToSetupPose();
+    this.skeleton.updateWorldTransform();
+    console.log('[SpineRenderer] 全局对齐边界计算完成');
+  }
+
+  /**
+   * 扫描单个动画全周期的最大包围盒
+   */
+  private updateAnimationBounds(animName: string) {
+    if (!this.skeleton || !this.state) return;
+
+    const animation = this.skeleton.data.findAnimation(animName);
+    if (!animation) return;
+
+    const duration = animation.duration;
+    const samples = 15;
+
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    const offset = new (this.spineWebGL.Vector2 || spine.Vector2)();
+    const size = new (this.spineWebGL.Vector2 || spine.Vector2)();
+
+    const track = this.state.getCurrent(0);
+
+    for (let i = 0; i <= samples; i++) {
+      const time = (i / samples) * duration;
+      animation.apply(this.skeleton, 0, time, false, [], 1.0, 0, 0);
+      this.skeleton.updateWorldTransform();
+      this.skeleton.getBounds(offset, size, []);
+
+      minX = Math.min(minX, offset.x);
+      minY = Math.min(minY, offset.y);
+      maxX = Math.max(maxX, offset.x + size.x);
+      maxY = Math.max(maxY, offset.y + size.y);
+    }
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const paddingX = width * 0.1;
+    const paddingY = height * 0.1;
+
+    this.bounds = {
+      offset: { x: minX - paddingX, y: minY - paddingY },
+      size: { x: width + paddingX * 2, y: height + paddingY * 2 }
+    };
+
+    if (track) {
+      this.state.apply(this.skeleton);
+      this.skeleton.updateWorldTransform();
     }
   }
 
@@ -217,16 +321,12 @@ export class SpineRenderer {
       if (track) {
         track.trackTime = time;
         this.currentTime = time;
-        // Apply immediately to update pose
         this.state.apply(this.skeleton);
         this.skeleton.updateWorldTransform();
       }
     }
   }
 
-  /**
-   * 重置当前动画到开头
-   */
   resetAnimation() {
     if (this.state) {
       const track = this.state.getCurrent(0);
@@ -275,7 +375,7 @@ export class SpineRenderer {
     if (this.isRunning) return;
     this.isRunning = true;
     this.lastTime = Date.now();
-    this.lastFrameTime = Date.now(); // 初始化帧时间
+    this.lastFrameTime = Date.now();
     this.renderLoop();
   }
 
@@ -284,7 +384,6 @@ export class SpineRenderer {
     cancelAnimationFrame(this.requestId);
   }
 
-  // 暴露给外部的状态
   currentTime: number = 0;
   totalTime: number = 0;
 
@@ -294,59 +393,44 @@ export class SpineRenderer {
     const now = Date.now();
     const elapsed = now - this.lastFrameTime;
 
-    // 帧率限制: 只有当经过的时间超过帧间隔时才更新
     if (elapsed < this.frameInterval) {
       this.requestId = requestAnimationFrame(() => this.renderLoop());
       return;
     }
 
-    // 计算实际的 delta,考虑帧率限制
     let delta = elapsed / 1000;
     this.lastFrameTime = now - (elapsed % this.frameInterval);
-
-    // 限制最大 delta 防止卡顿时飞跃
     if (delta > 0.1) delta = 0;
 
     this.updateAndRender(delta);
-
     this.requestId = requestAnimationFrame(() => this.renderLoop());
   }
 
-  /**
-   * 手动渲染一帧 (用于导出)
-   * @param delta 秒
-   */
   public updateAndRender(delta: number) {
     const gl = this.gl;
-
-    // 清除画布
     gl.clearColor(this.bgColor[0], this.bgColor[1], this.bgColor[2], this.bgColor[3]);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
     try {
       if (this.skeleton && this.state && this.bounds) {
         if (this.isPlaying) {
-          // 更新动画时间
           this.state.update(delta * this.timeScale);
           this.state.apply(this.skeleton);
           this.skeleton.updateWorldTransform();
         }
 
-        // Sync state for UI
         const track = this.state.getCurrent(0);
         if (track) {
           this.currentTime = track.trackTime % track.animation.duration;
           this.totalTime = track.animation.duration;
         }
 
-        // 视口适配逻辑 (Contain 模式)
         const b = this.bounds;
         const contentW = b.size.x;
         const contentH = b.size.y;
         const centerX = b.offset.x + contentW / 2;
         const centerY = b.offset.y + contentH / 2;
 
-        // 画布尺寸
         const canvasW = this.canvas.width;
         const canvasH = this.canvas.height;
         const canvasAspect = canvasW / canvasH;
@@ -354,30 +438,23 @@ export class SpineRenderer {
 
         let viewW, viewH;
 
-        // Fit 逻辑: 确保内容完全可见
         if (canvasAspect > contentAspect) {
-          // 画布更宽 -> 高度撑满，宽度自适应
           viewH = contentH;
           viewW = contentH * canvasAspect;
         } else {
-          // 画布更高 -> 宽度撑满，高度自适应
           viewW = contentW;
           viewH = contentW / canvasAspect;
         }
 
-        // 应用缩放系数
         const zoom = this.scale;
         viewW /= zoom;
         viewH /= zoom;
 
-        // 计算视口左下角
         const x = centerX - viewW / 2;
         const y = centerY - viewH / 2;
 
-        // 设置 MVP 投影
         this.mvp.ortho2d(x, y, viewW, viewH);
 
-        // 渲染
         this.shader.bind();
         this.shader.setUniformi(this.spineWebGL.Shader.SAMPLER, 0);
         this.shader.setUniform4x4f(this.spineWebGL.Shader.MVP_MATRIX, this.mvp.values);
@@ -386,15 +463,9 @@ export class SpineRenderer {
         this.skeletonRenderer.draw(this.batcher, this.skeleton);
         this.batcher.end();
         this.shader.unbind();
-
-        const glError = gl.getError();
-        if (glError !== gl.NO_ERROR) {
-          console.error("WebGL Error:", glError);
-        }
       }
     } catch (e) {
       console.error("Render Loop Error:", e);
-      // Reset batcher state if it crashed while drawing
       if (this.batcher && this.batcher.isDrawing) {
         try { this.batcher.end(); } catch (e2) { }
       }
@@ -412,7 +483,6 @@ export class SpineRenderer {
   setTargetFPS(fps: number) {
     this.targetFPS = fps;
     this.frameInterval = 1000 / fps;
-    console.log(`目标帧率设置为: ${fps} FPS, 帧间隔: ${this.frameInterval.toFixed(2)}ms`);
   }
 
   dispose() {
